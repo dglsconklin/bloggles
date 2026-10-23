@@ -342,12 +342,13 @@ async function openGatt(){
   (await svc.getCharacteristics()).forEach(c=>{ log('Channel '+c.uuid.slice(0,8)+': '+props(c)); allChars.push({c,s:'main'}); });
   try{ const s2=await srv.getPrimaryService(0xfec0); (await s2.getCharacteristics()).forEach(c=>{ log('Extra channel '+c.uuid.slice(0,8)+': '+props(c)); allChars.push({c,s:'extra',listening:false}); }); }
   catch(e){ log('Extra service: '+(e.name||e.message)); }
-  const main=allChars.filter(x=>x.s==='main').map(x=>x.c);
-  wch=main.find(c=>c.properties.writeWithoutResponse)||main.find(c=>c.properties.write);
-  nch=main.find(c=>c.properties.notify)||main.find(c=>c.properties.indicate)||null;
+  const pick=arr=>({w:arr.find(c=>c.properties.writeWithoutResponse)||arr.find(c=>c.properties.write), n:arr.find(c=>c.properties.notify)||arr.find(c=>c.properties.indicate)||null});
+  let sel=pick(allChars.filter(x=>x.s==='extra').map(x=>x.c));
+  if(!sel.w||!sel.n) sel=pick(allChars.filter(x=>x.s==='main').map(x=>x.c));
+  wch=sel.w; nch=sel.n;
   if(!wch) throw new Error('No writable channel found on the helmet.');
   log('Writing to '+wch.uuid.slice(0,8)+(nch?', listening on '+nch.uuid.slice(0,8):', no reply channel'));
-  if(nch) await listen(nch);
+  if(nch){ await listen(nch); const e=allChars.find(x=>x.c===nch); if(e) e.listening=true; }
   setConn('on','Connected');
 }
 async function connect(){
@@ -356,7 +357,7 @@ async function connect(){
     setConn('busy','Connecting');
     log('Chrome '+((navigator.userAgent.match(/Chrome\/[\d.]+/)||['?'])[0]));
     dev = await navigator.bluetooth.requestDevice({filters:[{name:'Bloggles'},{namePrefix:'Blog'},{services:[SVC]}], optionalServices:[SVC,0xfec0,'device_information']});
-    log('Picked '+(dev.name||'device'));
+    log('Picked '+(dev.name||'device')); $('wmode').value='auto';
     dev.addEventListener('gattserverdisconnected',()=>{ wch=null; nch=null; log('Disconnected'); if(quiet) return; setConn('','Reconnect'); msg('Helmet disconnected. Tap Send and it will reconnect.',true); });
     await openGatt();
     msg('Connected to '+(dev.name||'helmet')+'. Draw something and tap Send.');
