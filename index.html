@@ -114,6 +114,8 @@ body.fxon .editonly{opacity:.4;pointer-events:none}
       <div class="row"><label class="chk" for="sens">Sensitivity</label><input type="range" id="sens" min="0.5" max="3" step="0.1" value="1" style="flex:1"></div>
     </div>
     <div class="fxgrid" id="fxGrid"></div>
+    <div class="row"><label class="chk" for="smooth">Smoothness</label>
+      <select id="smooth"><option value="6:40" selected>Standard (like the Bloggles app)</option><option value="3:80">Smooth (twice the frames)</option><option value="2:120">Ultra (experimental)</option></select></div>
     <div class="row"><label class="chk" for="fxSpeed">Effect speed</label><input type="range" id="fxSpeed" min="0.25" max="3" step="0.05" value="1" style="flex:1"><span id="fxSpeedOut" style="font-size:14px;min-width:40px">1×</span></div>
     <p class="hint" id="fps"></p>
   </section>
@@ -182,10 +184,6 @@ body.fxon .editonly{opacity:.4;pointer-events:none}
     <div class="row">
       <label class="chk" for="rate">Stream rate</label>
       <select id="rate"><option value="0" selected>As fast as possible</option><option value="5">Up to 5 frames/sec</option><option value="2">Up to 2 frames/sec</option></select>
-    </div>
-    <div class="row">
-      <label class="chk" for="maxFrames">Effect frame limit</label>
-      <select id="maxFrames"><option value="40" selected>40 (like the Bloggles app)</option><option value="60">60 (smoother, experimental)</option><option value="90">90 (smoothest, experimental)</option></select>
     </div>
     <div class="row"><button class="tb" id="probeBtn">Run connection test</button></div>
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:14px;font-weight:600">Connection log</summary>
@@ -651,7 +649,7 @@ function encodeRGB(buf,idx,dur){
   const k=parseFloat($('bright').value)*127, swap=$('swapEyes').checked, flip=$('flipR').checked;
   for(let e=0;e<2;e++){ const slot=swap?1-e:e;
     for(let i=0;i<77;i++){ const src=(e===1&&flip)?Math.floor(i/11)*11+(10-i%11):i; if(!IN(src)) continue; const o=(e*77+src)*3;
-      let r=Math.pow(clamp(buf[o]),2.2), g=Math.pow(clamp(buf[o+1]),2.2), bl=Math.pow(clamp(buf[o+2]),2.2); const s=r+g+bl; if(s>1){ r/=s; g/=s; bl/=s; }
+      let r=Math.pow(clamp(buf[o]),1.9), g=Math.pow(clamp(buf[o+1]),1.9), bl=Math.pow(clamp(buf[o+2]),1.9); const s=r+g+bl; if(s>1){ r/=s; g/=s; bl/=s; }
       const off=4+(slot*77+i)*3; b[off]=Math.round(g*k); b[off+1]=Math.round(r*k); b[off+2]=Math.round(bl*k); } }
   return b;
 }
@@ -684,8 +682,10 @@ function renderFxGrid(){
 }
 function updateSendBtn(){ $('sendBtn').textContent=fx&&fx.cat==='sound'?(streaming?'Stop streaming':'Stream to helmet'):'Send to helmet'; }
 function bakeFx(F,speed){
-  const L=F.loop, real=L/speed, maxF=+$('maxFrames').value;
-  const N=Math.max(2,Math.min(maxF,Math.round(real/0.06))), dur=clamp(Math.round(real/N*100),1,255);
+  const L=F.loop, real=L/speed, sm=$('smooth').value.split(':').map(Number), maxF=sm[1];
+  let dur=sm[0], N=Math.round(real*100/dur);
+  if(N>maxF){ dur=Math.ceil(real*100/maxF); N=Math.round(real*100/dur); }
+  N=Math.max(2,Math.min(maxF,N)); dur=clamp(dur,1,255);
   const O=F.seamless?0:Math.max(2,Math.round(N*0.3)), Z={level:0,bands:new Float32Array(11),beat:false,sinceBeat:9,hue:0,bass:0};
   const S={}; if(F.init) F.init(S); const sub=1/60; let t=0;
   const warm=F.seamless?0:(F.warm===undefined?1.5:F.warm);
@@ -701,7 +701,7 @@ async function sendFx(){
   const F=fx, baked=bakeFx(F,+$('fxSpeed').value), list=baked.frames.map((b,k)=>encodeRGB(b,k,baked.dur));
   try{ $('sendBtn').disabled=true; await ensureLink($('fresh').checked);
     await uploadAnim(list,(k,n)=>msg('Uploading '+F.name+'… '+k+'/'+n));
-    msg(F.name+' is playing on the helmet.'); }
+    msg(F.name+' is playing on the helmet ('+list.length+' frames).'); }
   catch(e){ bleError(e); } finally{ $('sendBtn').disabled=false; }
 }
 function setFx(F){
