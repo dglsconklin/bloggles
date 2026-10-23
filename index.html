@@ -537,7 +537,9 @@ function hsv(h,s,v){ h=fract(h)*6; const i=Math.floor(h),f=h-i,p=v*(1-s),q=v*(1-
 function hash3(x,y,z){ let h=(Math.imul(x|0,374761393)+Math.imul(y|0,668265263)+Math.imul(z|0,1442695041))|0; h=Math.imul(h^(h>>>13),1274126177); h^=h>>>16; return (h>>>0)/4294967295; }
 function noise3(x,y,z){ const xi=Math.floor(x),yi=Math.floor(y),zi=Math.floor(z),xf=x-xi,yf=y-yi,zf=z-zi,u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf),w3=zf*zf*(3-2*zf); let r=0;
   for(let dz=0;dz<2;dz++)for(let dy=0;dy<2;dy++)for(let dx=0;dx<2;dx++) r+=hash3(xi+dx,yi+dy,zi+dz)*(dx?u:1-u)*(dy?v:1-v)*(dz?w3:1-w3); return r; }
-function lubdub(t,bpm){ const ph=fract(t*bpm/60); return Math.max(Math.exp(-Math.pow((ph-0.05)/0.05,2)),0.7*Math.exp(-Math.pow((ph-0.3)/0.06,2))); }
+function lubdub(t,bpm){ const ph=fract(t*bpm/60), cd=c=>{ const d=Math.abs(ph-c); return Math.min(d,1-d); };
+  return Math.max(Math.exp(-Math.pow(cd(0.1)/0.09,2)),0.7*Math.exp(-Math.pow(cd(0.38)/0.1,2))); }
+const HEART=["...........","...xx.xx...","..xxxxxxx..",".xxxxxxxxx.","..xxxxxxx..","....xxx....",".....x....."];
 function heartCov(x,y,s){ let n=0; for(let i=0;i<3;i++)for(let j=0;j<3;j++){ const u=(x-0.33+i*0.33-5)/(4*s), v=-(y-0.33+j*0.33-3.4)/(3*s); const a=u*u+v*v-1; if(a*a*a-u*u*v*v*v<=0) n++; } return n/9; }
 function firePal(h){ h=clamp(h); if(h<0.33) return [h*3*0.85,0,0]; if(h<0.66) return [0.85+(h-0.33)*0.45,(h-0.33)*3*0.45,0]; return [1,0.45+(h-0.66)*3*0.45,(h-0.66)*3*0.25]; }
 const EYE=PRESETS[0][1];
@@ -562,9 +564,10 @@ function eyePx(S,t,x,y,o){ o=o||{}; const iris=o.iris||3, pupil=o.pupil||1, hot=
   return sc([0.07,0,0.02],glow); }
 
 const FX=[
+ {id:'heartwave',name:'Heart wave',cat:'fun',loop:1.3,seamless:true,px:(S,t,x,y,e)=>HEART[y][x]==='x'?hsv((x+e*11)/22+y/40-t/1.3,1,1):[0,0,0]},
  {id:'rainbow',name:'Rainbow wave',cat:'fun',loop:10/3,seamless:true,px:(S,t,x,y,e)=>hsv((x+e*13+y*0.8)/22-t*0.3,1,1)},
  {id:'criss',name:'Crisscross',cat:'fun',loop:3.927,seamless:true,px:(S,t,x,y,e)=>{ const g=x+e*13,a=Math.sin((g+y)*0.75-t*3.2),b=Math.sin((g-y)*0.75+t*3.2),v=Math.pow((Math.max(a,b)+1)/2,2.5); return hsv(g/26+y/14+t/3.927,1,0.08+0.92*v); }},
- {id:'hearts',name:'Rainbow hearts',cat:'fun',loop:2.5,seamless:true,px:(S,t,x,y)=>{ const p=lubdub(t,72),cov=heartCov(x,y,0.86+0.16*p); return cov?hsv((x+y)/16-t*0.4,1,cov*(0.55+0.45*p)):[0,0,0]; }},
+ {id:'hearts',name:'Rainbow hearts',cat:'fun',loop:2.5,seamless:true,px:(S,t,x,y)=>{ const p=lubdub(t,72),cov=heartCov(x,y,0.94); return cov?hsv((x+y)/16-t*0.4,1,cov*(0.7+0.3*p)):[0,0,0]; }},
  {id:'plasma',name:'Plasma',cat:'fun',loop:6,seamless:true,px:(S,t,x,y,e)=>{ const m=e?10-x:x,q=t*Math.PI/3; return hsv((Math.sin(m*0.55+q)+Math.sin(y*0.7-q)+Math.sin((m+y)*0.4+q)+Math.sin(Math.hypot(m-5,y-3)*0.9-2*q))/8+t/6,1,1); }},
  {id:'swirl',name:'Swirl',cat:'fun',loop:20/7,seamless:true,px:(S,t,x,y,e)=>{ const m=e?10-x:x,dx=m-5,dy=(y-3)*1.15,a=Math.atan2(dy,dx),r=Math.hypot(dx,dy); return hsv(a/(2*Math.PI)+r*0.07-t*0.35,1,0.3+0.7*(Math.sin(a*3+r*1.2-t*4.398)+1)/2); }},
  {id:'ripple',name:'Ripple',cat:'fun',loop:0.8*Math.PI,seamless:true,px:(S,t,x,y)=>{ const d=Math.hypot(x-5,(y-3)*1.25),w=(Math.sin(d*1.7-t*5)+1)/2; return hsv(t/(0.8*Math.PI)+d*0.06,1,w*w); }},
