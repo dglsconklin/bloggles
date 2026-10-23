@@ -141,6 +141,17 @@ label.chk{display:flex;align-items:center;gap:8px;font-size:14px}
       <label class="chk"><input type="checkbox" id="swapEyes"> Swap eyes</label>
       <label class="chk"><input type="checkbox" id="flipR"> Flip right eye</label>
     </div>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="fresh" checked> Reconnect before each Send</label>
+    </div>
+    <div class="row">
+      <label class="chk" for="wmode">Write mode</label>
+      <select id="wmode"><option value="auto" selected>Auto</option><option value="nr">Without response</option><option value="wr">With response</option></select>
+    </div>
+    <details style="margin-top:8px"><summary style="cursor:pointer;font-size:14px;font-weight:600">Connection log</summary>
+      <pre id="log" style="background:var(--well);color:#d9d4ce;border-radius:10px;padding:10px;font-size:12px;line-height:1.4;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0"></pre>
+      <button class="tb sm" id="logCopy">Copy log</button>
+    </details>
     <div class="row" id="dlRow" hidden>
       <button class="tb sm" id="dlBtn">Save this app to your phone</button>
     </div>
@@ -295,65 +306,113 @@ function encode(f){
 }
 
 /* bluetooth */
-let dev=null, wch=null, nch=null, busy=Promise.resolve(), ackRes=null, playing=false;
+let dev=null, wch=null, nch=null, nCount=0, playing=false, quiet=false, busy=Promise.resolve();
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const t0=Date.now();
+const hex=(v,n)=>{ n=n||14; const u=new Uint8Array(v.buffer,v.byteOffset,v.byteLength); return Array.from(u.slice(0,n)).map(x=>x.toString(16).padStart(2,'0')).join(' ')+(u.length>n?' ... ('+u.length+' bytes)':''); };
+function log(s){ const el=$('log'); el.textContent+=((Date.now()-t0)/1000).toFixed(1)+'s  '+s+'\n'; el.scrollTop=el.scrollHeight; }
 function setConn(state,txt){ const c=$('connBtn'); c.classList.remove('on','busy'); if(state) c.classList.add(state); $('connTxt').textContent=txt; }
 function bleError(e){
+  log('Error: '+(e&&e.name?e.name+': ':'')+(e&&e.message||e));
   if(e && e.name==='NotFoundError') return msg('No helmet picked. Make sure it’s on and the Graphic app is closed.',true);
-  if(e && (e.name==='SecurityError'||/permission|policy|allowed/i.test(e.message||''))){ $('dlRow').hidden=false;
+  if(e && (e.name==='SecurityError'||/permission|policy|not allowed/i.test(e.message||''))){ $('dlRow').hidden=false;
     return msg('Bluetooth is blocked in this viewer. Use “Save this app to your phone” under Setup and open it in Chrome.',true); }
   msg('Bluetooth error: '+(e&&e.message||e),true);
+}
+function wmode(){ const s=$('wmode').value; if(s!=='auto') return s; return wch.properties.writeWithoutResponse?'nr':'wr'; }
+async function w(bytes,mode){
+  const v=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes); mode=mode||wmode();
+  log('-> '+hex(v)+(mode==='wr'?'  [with response]':'  [without response]'));
+  if(mode==='wr') await wch.writeValueWithResponse(v); else await wch.writeValueWithoutResponse(v);
+}
+async function waitNotif(since,ms){ const t=Date.now(); while(nCount<=since && Date.now()-t<ms) await sleep(15); return nCount>since; }
+
+async function openGatt(){
+  log('Opening connection');
+  const srv=await dev.gatt.connect();
+  const svc=await srv.getPrimaryService(SVC);
+  const chars=await svc.getCharacteristics();
+  chars.forEach(c=>{ const p=Object.keys(c.properties).filter(k=>c.properties[k]).join(', '); log('Channel '+c.uuid.slice(0,8)+': '+p); });
+  wch=chars.find(c=>c.properties.writeWithoutResponse)||chars.find(c=>c.properties.write);
+  nch=chars.find(c=>c.properties.notify)||chars.find(c=>c.properties.indicate)||null;
+  if(!wch) throw new Error('No writable channel found on the helmet.');
+  log('Writing to '+wch.uuid.slice(0,8)+(nch?', listening on '+nch.uuid.slice(0,8):', no reply channel'));
+  if(nch){ nch.addEventListener('characteristicvaluechanged',e=>{ nCount++; log('<- '+hex(e.target.value)); }); await nch.startNotifications(); }
+  setConn('on','Connected');
 }
 async function connect(){
   if(!navigator.bluetooth){ $('dlRow').hidden=false; return msg('Bluetooth isn’t available here. Open this app in Chrome on your Pixel.',true); }
   try{
     setConn('busy','Connecting');
+    log('Chrome '+((navigator.userAgent.match(/Chrome\/[\d.]+/)||['?'])[0]));
     dev = await navigator.bluetooth.requestDevice({filters:[{name:'Bloggles'},{namePrefix:'Blog'},{services:[SVC]}], optionalServices:[SVC,0xfec0]});
-    dev.addEventListener('gattserverdisconnected',()=>{ wch=null; setConn('','Reconnect'); msg('Helmet disconnected. Tap Reconnect.',true); });
-    const srv = await dev.gatt.connect();
-    const svc = await srv.getPrimaryService(SVC);
-    const chars = await svc.getCharacteristics();
-    wch = chars.find(c=>c.properties.writeWithoutResponse) || chars.find(c=>c.properties.write);
-    nch = chars.find(c=>c.properties.notify);
-    if(!wch) throw new Error('No writable channel found on the helmet.');
-    if(nch){ await nch.startNotifications(); nch.addEventListener('characteristicvaluechanged',()=>{ if(ackRes){ const r=ackRes; ackRes=null; r(); } }); }
-    setConn('on','Connected'); msg('Connected to '+(dev.name||'helmet')+'. Draw something and tap Send.');
+    log('Picked '+(dev.name||'device'));
+    dev.addEventListener('gattserverdisconnected',()=>{ wch=null; nch=null; log('Disconnected'); if(quiet) return; setConn('','Reconnect'); msg('Helmet disconnected. Tap Send and it will reconnect.',true); });
+    await openGatt();
+    msg('Connected to '+(dev.name||'helmet')+'. Draw something and tap Send.');
   }catch(e){ setConn('', dev?'Reconnect':'Connect'); bleError(e); }
 }
-$('connBtn').onclick=connect;
-async function w(bytes){ const v=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
-  if(wch.properties.writeWithoutResponse) await wch.writeValueWithoutResponse(v); else await wch.writeValueWithResponse(v); }
-function ack(ms){ return new Promise(r=>{ ackRes=r; setTimeout(()=>{ if(ackRes===r){ ackRes=null; r(); } }, ms||400); }); }
+$('connBtn').onclick=()=>{
+  if(dev && !dev.gatt.connected){ setConn('busy','Connecting'); openGatt().then(()=>msg('Reconnected.')).catch(e=>{ setConn('','Reconnect'); bleError(e); }); }
+  else connect();
+};
+async function ensureLink(fresh){
+  if(!dev) throw new Error('Not connected');
+  if(fresh && dev.gatt.connected){
+    quiet=true; log('Starting a fresh connection');
+    await new Promise(res=>{ dev.addEventListener('gattserverdisconnected',res,{once:true}); dev.gatt.disconnect(); setTimeout(res,1500); });
+    await sleep(300); quiet=false;
+  }
+  if(!dev.gatt.connected||!wch){ setConn('busy','Connecting'); await openGatt(); }
+}
 function sendFrame(f){
   busy = busy.then(async()=>{
     if(!wch) throw new Error('Not connected');
-    await w([4,0xff,0xff]); await ack();
-    await w([1,0xab,0xab,1,0]); await ack();
-    await w(encode(f)); await sleep(40);
-    await w([3]); await ack();
+    let n=nCount;
+    await w([4,255,255]); if(nch) await waitNotif(n,600);
+    n=nCount; await w([1,0xab,0xab,1,0]); if(nch) await waitNotif(n,600);
+    const frame=encode(f);
+    n=nCount; await w(frame);
+    let ok = nch ? await waitNotif(n,800) : true;
+    if(!ok){
+      log('No reply to the design data');
+      if($('wmode').value==='auto' && wch.properties.write && wmode()==='nr'){
+        log('Retrying with response'); n=nCount; await w(frame,'wr'); ok=await waitNotif(n,800);
+        if(ok){ $('wmode').value='wr'; log('Switched write mode to With response'); }
+      }
+    }
+    await sleep(30); await w([3]);
+    log(ok?'Done':'Done, but the helmet never confirmed the design');
+    return ok;
   });
   return busy.catch(e=>{ busy=Promise.resolve(); throw e; });
 }
 async function sendCurrent(){
-  if(!wch) return msg('Connect to the helmet first.',true);
-  try{ $('sendBtn').disabled=true; await sendFrame(frames[cur]); msg('Sent.'); }
-  catch(e){ bleError(e); } finally{ $('sendBtn').disabled=false; }
+  if(!dev) return msg('Connect to the helmet first.',true);
+  try{
+    $('sendBtn').disabled=true; msg('Sending…');
+    await ensureLink($('fresh').checked);
+    const ok=await sendFrame(frames[cur]);
+    msg(ok?'Sent.':'Sent, but the helmet didn’t confirm it. Open Connection log under Setup.', !ok);
+  }catch(e){ bleError(e); } finally{ $('sendBtn').disabled=false; }
 }
 let liveT=null;
-function liveSend(){ if(!$('live').checked||!wch||playing) return; clearTimeout(liveT); liveT=setTimeout(()=>sendFrame(frames[cur]).catch(bleError),150); }
+function liveSend(){ if(!$('live').checked||!dev||playing) return; clearTimeout(liveT); liveT=setTimeout(()=>ensureLink(false).then(()=>sendFrame(frames[cur])).catch(bleError),150); }
 $('sendBtn').onclick=sendCurrent;
 $('fPlay').onclick=async()=>{
   if(playing){ playing=false; return; }
-  if(!wch) return msg('Connect to the helmet first.',true);
+  if(!dev) return msg('Connect to the helmet first.',true);
   playing=true; $('fPlay').textContent='Stop'; $('fPlay').classList.add('on'); msg('Playing animation.');
-  try{ while(playing){ for(let i=0;i<frames.length&&playing;i++){ cur=i; render(); const t=Date.now(); await sendFrame(frames[i]);
+  try{ await ensureLink(false);
+    while(playing){ for(let i=0;i<frames.length&&playing;i++){ cur=i; render(); const t=Date.now(); await sendFrame(frames[i]);
         const left=+$('speed').value-(Date.now()-t); if(left>0) await sleep(left); } } }
   catch(e){ bleError(e); }
   playing=false; $('fPlay').textContent='Play'; $('fPlay').classList.remove('on'); };
-function testEye(eye){ const f=blank(); f[eye][3]='R'; if(!wch) return msg('Connect to the helmet first.',true);
-  sendFrame(f).then(()=>msg('Lit the top-left corner of the '+(eye==='L'?'left':'right')+' eye. Check where it appeared.')).catch(bleError); }
+function testEye(eye){ const f=blank(); f[eye][3]='R'; if(!dev) return msg('Connect to the helmet first.',true);
+  ensureLink($('fresh').checked).then(()=>sendFrame(f)).then(()=>msg('Lit the top-left corner of the '+(eye==='L'?'left':'right')+' eye. Check where it appeared.')).catch(bleError); }
 $('testL').onclick=()=>testEye('L');
 $('testR').onclick=()=>testEye('R');
+$('logCopy').onclick=async()=>{ try{ await navigator.clipboard.writeText($('log').textContent); msg('Log copied.'); }catch(e){ msg('Couldn’t copy. Press and hold the log text to select it.',true); } };
 
 /* self-download fallback */
 let dl=null;
