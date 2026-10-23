@@ -148,6 +148,7 @@ label.chk{display:flex;align-items:center;gap:8px;font-size:14px}
       <label class="chk" for="wmode">Write mode</label>
       <select id="wmode"><option value="auto" selected>Auto</option><option value="nr">Without response</option><option value="wr">With response</option></select>
     </div>
+    <div class="row"><button class="tb" id="probeBtn">Run connection test</button></div>
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:14px;font-weight:600">Connection log</summary>
       <pre id="log" style="background:var(--well);color:#d9d4ce;border-radius:10px;padding:10px;font-size:12px;line-height:1.4;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:8px 0"></pre>
       <button class="tb sm" id="logCopy">Copy log</button>
@@ -306,9 +307,11 @@ function encode(f){
 }
 
 /* bluetooth */
-let dev=null, wch=null, nch=null, nCount=0, playing=false, quiet=false, busy=Promise.resolve();
+let dev=null, wch=null, nch=null, nCount=0, playing=false, quiet=false, busy=Promise.resolve(), allChars=[];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 const t0=Date.now();
+const PN=['read','writeWithoutResponse','write','notify','indicate'];
+const props=c=>PN.filter(k=>c.properties[k]).join(', ')||'none';
 const hex=(v,n)=>{ n=n||14; const u=new Uint8Array(v.buffer,v.byteOffset,v.byteLength); return Array.from(u.slice(0,n)).map(x=>x.toString(16).padStart(2,'0')).join(' ')+(u.length>n?' ... ('+u.length+' bytes)':''); };
 function log(s){ const el=$('log'); el.textContent+=((Date.now()-t0)/1000).toFixed(1)+'s  '+s+'\n'; el.scrollTop=el.scrollHeight; }
 function setConn(state,txt){ const c=$('connBtn'); c.classList.remove('on','busy'); if(state) c.classList.add(state); $('connTxt').textContent=txt; }
@@ -326,18 +329,25 @@ async function w(bytes,mode){
   if(mode==='wr') await wch.writeValueWithResponse(v); else await wch.writeValueWithoutResponse(v);
 }
 async function waitNotif(since,ms){ const t=Date.now(); while(nCount<=since && Date.now()-t<ms) await sleep(15); return nCount>since; }
-
+async function listen(c){
+  c.addEventListener('characteristicvaluechanged',e=>{ nCount++; log('<- '+c.uuid.slice(0,8)+': '+hex(e.target.value)); });
+  try{ await c.startNotifications(); log('Listening on '+c.uuid.slice(0,8)); return true; }
+  catch(err){ log('Couldn’t listen on '+c.uuid.slice(0,8)+': '+(err.message||err)); return false; }
+}
 async function openGatt(){
   log('Opening connection');
   const srv=await dev.gatt.connect();
+  allChars=[];
   const svc=await srv.getPrimaryService(SVC);
-  const chars=await svc.getCharacteristics();
-  chars.forEach(c=>{ const p=Object.keys(c.properties).filter(k=>c.properties[k]).join(', '); log('Channel '+c.uuid.slice(0,8)+': '+p); });
-  wch=chars.find(c=>c.properties.writeWithoutResponse)||chars.find(c=>c.properties.write);
-  nch=chars.find(c=>c.properties.notify)||chars.find(c=>c.properties.indicate)||null;
+  (await svc.getCharacteristics()).forEach(c=>{ log('Channel '+c.uuid.slice(0,8)+': '+props(c)); allChars.push({c,s:'main'}); });
+  try{ const s2=await srv.getPrimaryService(0xfec0); (await s2.getCharacteristics()).forEach(c=>{ log('Extra channel '+c.uuid.slice(0,8)+': '+props(c)); allChars.push({c,s:'extra',listening:false}); }); }
+  catch(e){ log('Extra service: '+(e.name||e.message)); }
+  const main=allChars.filter(x=>x.s==='main').map(x=>x.c);
+  wch=main.find(c=>c.properties.writeWithoutResponse)||main.find(c=>c.properties.write);
+  nch=main.find(c=>c.properties.notify)||main.find(c=>c.properties.indicate)||null;
   if(!wch) throw new Error('No writable channel found on the helmet.');
   log('Writing to '+wch.uuid.slice(0,8)+(nch?', listening on '+nch.uuid.slice(0,8):', no reply channel'));
-  if(nch){ nch.addEventListener('characteristicvaluechanged',e=>{ nCount++; log('<- '+hex(e.target.value)); }); await nch.startNotifications(); }
+  if(nch) await listen(nch);
   setConn('on','Connected');
 }
 async function connect(){
@@ -345,7 +355,7 @@ async function connect(){
   try{
     setConn('busy','Connecting');
     log('Chrome '+((navigator.userAgent.match(/Chrome\/[\d.]+/)||['?'])[0]));
-    dev = await navigator.bluetooth.requestDevice({filters:[{name:'Bloggles'},{namePrefix:'Blog'},{services:[SVC]}], optionalServices:[SVC,0xfec0]});
+    dev = await navigator.bluetooth.requestDevice({filters:[{name:'Bloggles'},{namePrefix:'Blog'},{services:[SVC]}], optionalServices:[SVC,0xfec0,'device_information']});
     log('Picked '+(dev.name||'device'));
     dev.addEventListener('gattserverdisconnected',()=>{ wch=null; nch=null; log('Disconnected'); if(quiet) return; setConn('','Reconnect'); msg('Helmet disconnected. Tap Send and it will reconnect.',true); });
     await openGatt();
@@ -363,7 +373,7 @@ async function ensureLink(fresh){
     await new Promise(res=>{ dev.addEventListener('gattserverdisconnected',res,{once:true}); dev.gatt.disconnect(); setTimeout(res,1500); });
     await sleep(300); quiet=false;
   }
-  if(!dev.gatt.connected||!wch){ setConn('busy','Connecting'); await openGatt(); }
+  if(!dev.gatt.connected||!wch){ setConn('busy','Connecting'); await openGatt(); await sleep(1000); }
 }
 function sendFrame(f){
   busy = busy.then(async()=>{
@@ -393,12 +403,44 @@ async function sendCurrent(){
     $('sendBtn').disabled=true; msg('Sending…');
     await ensureLink($('fresh').checked);
     const ok=await sendFrame(frames[cur]);
-    msg(ok?'Sent.':'Sent, but the helmet didn’t confirm it. Open Connection log under Setup.', !ok);
+    msg(ok?'Sent.':'Sent, but the helmet didn’t confirm it. Run the connection test under Setup.', !ok);
   }catch(e){ bleError(e); } finally{ $('sendBtn').disabled=false; }
+}
+async function readInfo(){
+  try{
+    const s=await dev.gatt.getPrimaryService('device_information'); const cs=await s.getCharacteristics();
+    for(const c of cs){ if(!c.properties.read) continue;
+      try{ const v=await c.readValue(); log('Info '+c.uuid.slice(4,8)+': '+new TextDecoder().decode(v)); }catch(e){ log('Info '+c.uuid.slice(4,8)+': unreadable'); } }
+  }catch(e){ log('Device info unavailable: '+(e.name||e.message)); }
+}
+async function probe(){
+  if(!dev) return msg('Connect to the helmet first.',true);
+  const btn=$('probeBtn'); btn.disabled=true;
+  try{
+    msg('Running connection test. This takes about 15 seconds.'); log('--- Connection test ---');
+    await ensureLink(false); await sleep(1200);
+    await readInfo();
+    for(const x of allChars){ if(x.s==='extra' && !x.listening && (x.c.properties.notify||x.c.properties.indicate)){ x.listening=true; await listen(x.c); } }
+    let found=null;
+    for(const {c} of allChars){
+      for(const mode of ['nr','wr']){
+        if(mode==='nr' && !c.properties.writeWithoutResponse) continue;
+        if(mode==='wr' && !c.properties.write) continue;
+        const n=nCount; log('Test '+c.uuid.slice(0,8)+' '+(mode==='nr'?'without':'with')+' response');
+        try{ const v=new Uint8Array([4,255,255]); if(mode==='nr') await c.writeValueWithoutResponse(v); else await c.writeValueWithResponse(v); }
+        catch(e){ log('  write failed: '+(e.message||e)); continue; }
+        if(await waitNotif(n,1000)){ log('  Reply received'); found={c,mode}; break; } else log('  No reply');
+      }
+      if(found) break;
+    }
+    if(found){ wch=found.c; $('wmode').value=found.mode; msg('Found a setup the helmet answers. Try Send now.'); log('Using '+wch.uuid.slice(0,8)+' '+found.mode); }
+    else msg('The helmet didn’t answer any test. Copy the log under Setup and send it to me.',true);
+  }catch(e){ bleError(e); } finally{ btn.disabled=false; }
 }
 let liveT=null;
 function liveSend(){ if(!$('live').checked||!dev||playing) return; clearTimeout(liveT); liveT=setTimeout(()=>ensureLink(false).then(()=>sendFrame(frames[cur])).catch(bleError),150); }
 $('sendBtn').onclick=sendCurrent;
+$('probeBtn').onclick=probe;
 $('fPlay').onclick=async()=>{
   if(playing){ playing=false; return; }
   if(!dev) return msg('Connect to the helmet first.',true);
